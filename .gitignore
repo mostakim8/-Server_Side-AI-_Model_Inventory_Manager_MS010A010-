@@ -1,0 +1,10 @@
+# .gitignore (Server Side)
+
+# Ignore environment file
+.env
+
+# Ignore node modules
+node_modules/
+
+# 🛑 CRITICAL: Ignore Firebase Service Account Key (Security Risk)
+serviceAccountKey.json
