@@ -5,30 +5,43 @@ const mongoose = require('mongoose');
 const admin = require('firebase-admin'); 
 const { ObjectId } = mongoose.Types; 
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 5001; 
 
-// 2. Firebase Admin Initialization
-// Ensure serviceAccountKey.json is available in the root
-const serviceAccount = require('./serviceAccountKey.json'); 
+// ⚠️ চূড়ান্ত সংশোধন: Firebase Admin Initialization (Vercel Optimized)
+// লোকাল ফাইল ফলব্যাক সম্পূর্ণরূপে বাদ দেওয়া হয়েছে।
+let firebaseInitialized = false;
 
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-});
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+        // Vercel Environment Variable থেকে JSON পার্স করে ক্রেডেনশিয়াল লোড করা হচ্ছে।
+        const serviceAccountConfig = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccountConfig)
+        });
+        firebaseInitialized = true;
+        console.log("Firebase Admin initialized from Environment Variables.");
+    } catch (e) {
+        // যদি JSON পার্স করতে বা initialize করতে সমস্যা হয়।
+        console.error("Firebase Admin Initialization FAILED (Environment Variable Error):", e.message);
+    }
+} else {
+    // Vercel এ লোকাল ফাইল খোঁজার চেষ্টা বন্ধ করা হলো।
+    console.warn("WARNING: Firebase Admin not initialized. Missing FIREBASE_SERVICE_ACCOUNT env var.");
+}
 
-// --- CORS Configuration (Same as provided) ---
 
+// 🌐 CORS Configuration (Deployment Friendly)
+// Production URL কে পরিবেশের ভেরিয়েবল থেকে নেওয়ার জন্য আপডেট করা হয়েছে
 const allowedOrigins = [
+    'http://localhost:5173', // লোকাল ফ্রন্টএন্ড 
+    process.env.FRONTEND_URL, // Netlify/Vercel লাইভ ফ্রন্টএন্ড URL
     'http://localhost:5176',
-    'http://localhost:5173', 
     'http://127.0.0.1:5173',
     'http://localhost:5175', 
     'http://127.0.0.1:5175',
     'http://localhost:5177'
-
 ];
 
 const corsOptions = {
@@ -48,8 +61,13 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// --- 3. Token Verification Middleware (Same as provided) ---
+// 3. Token Verification Middleware 
+// ... (আপনার verifyToken ফাংশন অপরিবর্তিত)
 const verifyToken = async (req, res, next) => {
+    if (!firebaseInitialized) {
+        return res.status(500).send({ message: 'Server Error: Firebase Admin not configured.' });
+    }
+    
     const authorization = req.headers.authorization;
     if (!authorization) {
         return res.status(401).send({ message: 'Unauthorized Access: Token missing' });
@@ -68,84 +86,80 @@ const verifyToken = async (req, res, next) => {
 };
 
 
-// --- MongoDB Connection & Updated Schema ---
+// MongoDB Connection & Updated Schema 
+// ... (connectDB এবং Schema অপরিবর্তিত)
+let isConnected = false;
+
 const connectDB = async () => { 
+    if (isConnected) return; // Already connected
+
     try {
         await mongoose.connect(process.env.DB_URI || 'mongodb://localhost:27017/ai_models_db'); 
+        isConnected = true;
         console.log("MongoDB connected successfully.");
     } catch (error) {
         console.error("MongoDB connection failed:", error.message);
+        isConnected = false;
+        // throw error; 
     }
 };
-connectDB();
 
-// 🔑 CRITICAL FIX: Model Schema আপডেট
+// Mongoose Schema (unchanged)
 const ModelSchema = new mongoose.Schema({
-    // Existing fields for backward compatibility
+    
     modelName: { type: String, required: true },
     category: { type: String, required: true },
     
-    // 🛑 ফিক্স: price ফিল্ডকে optional করা হলো এবং default 0 সেট করা হলো
-    price: { type: Number, required: false, default: 0 },
+    name: { type: String, default: function() { return this.modelName; } }, 
+    framework: { type: String, default: function() { return this.category; } }, 
     
-    // Assignment Required fields (Using existing fields for mapping)
-    name: { type: String, default: function() { return this.modelName; } }, // Maps to modelName
-    framework: { type: String, default: function() { return this.category; } }, // Maps to category
-    
-    // New required fields from assignment
     useCase: { type: String, default: 'General AI' },
     dataset: { type: String, default: 'Proprietary Data' },
     
     description: { type: String, required: true },
     imageUrl: { type: String, required: true },
     
-    // Developer fields (createdBy, developerUid)
     developerEmail: { type: String, required: true },
     developerUid: { type: String, required: true }, 
-    developerName: { type: String, required: false }, // Optional
+    developerName: { type: String, required: false }, 
     
-    // CRITICAL FIX: Purchase Counter field added
     purchased: { type: Number, default: 0 },
     
-    // Added createdAt field for sorting (Featured Models/Latest)
     createdAt: { type: Date, default: Date.now } 
 });
 
 const AIModelOne = mongoose.model('AIModel', ModelSchema);
 
-// --- API Endpoints ---
+// ------------------- ROUTES -------------------
+// ... (সকল routes অপরিবর্তিত)
 
 app.get('/', (req, res) => {
     res.send('AI Model Inventory Manager Server is running!');
 });
 
-// GET /models (with filtering, and sorting for featured/latest models)
 app.get('/models', async (req, res) => {
+    await connectDB();
     try {
         let query = {};
         let sort = {};
 
-        // Filter by email (My Models page uses this)
         if (req.query.email) {
             query.developerEmail = req.query.email;
         }
 
-        // Filter by category/framework (Home page filter uses this)
         if (req.query.category && req.query.category !== 'All') {
             query.category = req.query.category;
         }
         
-        // FIX: Latest 6 models logic (for Home/Featured) - Sort by creation date descending
         if (req.query.latest === 'true') {
             sort.createdAt = -1; // Newest first
         } else {
-             // Default sort by price descending for general list (as implemented in client Home)
-             sort.price = -1;
+             // 💡 price ফিল্ড না থাকায় default সর্টিং createdAt দিয়ে করা হলো
+             sort.createdAt = -1;
         }
         
         let modelsQuery = AIModelOne.find(query).sort(sort);
 
-        // Limit to 6 models only if 'latest=true' is explicitly requested
         if (req.query.latest === 'true') {
             modelsQuery = modelsQuery.limit(6);
         }
@@ -158,8 +172,28 @@ app.get('/models', async (req, res) => {
     }
 });
 
+app.get('/models/latest', async (req, res) => {
+    await connectDB();
+    try {
+        // 💡 skipCount 3 এর পরিবর্তে 0 ব্যবহার করা হলো, যাতে লেটেস্ট মডেলগুলো স্লাইডারে দেখা যায়
+        const skipCount = parseInt(req.query.skip) || 0; 
+        const limit = parseInt(req.query.limit) || 6; 
+        
+        const latestModels = await AIModelOne.find({})
+            .sort({ createdAt: -1 }) 
+            .skip(skipCount)
+            .limit(limit)
+            .exec();
+            
+        res.status(200).json(latestModels);
+    } catch (error) {
+        console.error("Error fetching latest models:", error);
+        res.status(500).send({ message: "Failed to fetch latest models due to server error." });
+    }
+});
 
 app.get('/models/:id', async (req, res) => {
+    await connectDB();
     try {
         const id = req.params.id;
         if (!ObjectId.isValid(id)) {
@@ -178,6 +212,7 @@ app.get('/models/:id', async (req, res) => {
 
 
 app.post('/models', verifyToken, async (req, res) => { 
+    await connectDB();
     try {
         const newModelData = req.body;
         
@@ -203,19 +238,18 @@ app.post('/models', verifyToken, async (req, res) => {
     }
 });
 
-// new API endpoint: Full Purchase Transaction (MongoDB & Firestore Log)
+
 app.post('/purchase-model', verifyToken, async (req, res) => {
+    await connectDB();
     try {
         const transactionData = req.body;
         const modelId = transactionData.modelId;
         const buyerUid = req.user.uid; 
         
-        // 1. Data Validation (modelId must be a valid MongoDB ObjectId)
         if (!ObjectId.isValid(modelId)) {
             return res.status(400).send({ message: "Invalid Model ID format: The string did not match the expected pattern." });
         }
         
-        // 2. MongoDB: Atomically increment the 'purchased' counter
         const mongoResult = await AIModelOne.updateOne(
             { _id: new ObjectId(modelId) },
             { $inc: { purchased: 1 } }
@@ -225,9 +259,8 @@ app.post('/purchase-model', verifyToken, async (req, res) => {
             return res.status(404).send({ message: "Model not found or update failed." });
         }
         
-        // 3. Firestore: Record the purchase transaction
+       
         const firestore = admin.firestore();
-        // Use a fallback for appId
         const appId = process.env.FIREBASE_APP_ID || 'default-app-id'; 
         const purchaseRef = firestore
                             .collection(`artifacts/${appId}/users/${buyerUid}/purchases`)
@@ -242,7 +275,6 @@ app.post('/purchase-model', verifyToken, async (req, res) => {
 
         await purchaseRef.set(purchaseRecord);
 
-        // 4. Success Response
         res.send({ 
             acknowledged: true, 
             message: `Purchase successful. Model count updated: ${mongoResult.modifiedCount}. Transaction logged.`,
@@ -255,11 +287,8 @@ app.post('/purchase-model', verifyToken, async (req, res) => {
     }
 });
 
-
-// This uses the $inc operator to atomically increase the 'purchased' counter.
-// NOTE: The new POST /purchase-model route above now handles this logic as well, 
-// but this PATCH route is kept for backward compatibility/direct counter update.
 app.patch('/models/purchase/:id', verifyToken, async (req, res) => {
+    await connectDB();
     try {
         const id = req.params.id;
         
@@ -269,11 +298,11 @@ app.patch('/models/purchase/:id', verifyToken, async (req, res) => {
 
         const result = await AIModelOne.updateOne(
             { _id: new ObjectId(id) },
-            { $inc: { purchased: 1 } } // Atomically increment the purchased count
+            { $inc: { purchased: 1 } } 
         );
 
         if (result.modifiedCount === 0) {
-            // If modifiedCount is 0, it means the model wasn't found (if ID was valid)
+            
             return res.status(404).send({ message: "Model not found or update failed." });
         }
         
@@ -285,9 +314,8 @@ app.patch('/models/purchase/:id', verifyToken, async (req, res) => {
     }
 });
 
-
-// PATCH: Update a model by ID (Private - Verification and Ownership check required)
 app.patch('/models/:id', verifyToken, async (req, res) => { 
+    await connectDB();
     try {
         const id = req.params.id;
         const updatedData = req.body;
@@ -305,7 +333,6 @@ app.patch('/models/:id', verifyToken, async (req, res) => {
 
         let isOwner = false;
 
-        // --- OWNERSHIP CHECK WITH FALLBACK ---
         if (existingModel.developerUid) {
             if (existingModel.developerUid === userUid) {
                 isOwner = true;
@@ -316,7 +343,6 @@ app.patch('/models/:id', verifyToken, async (req, res) => {
                 await AIModelOne.updateOne({ _id: new ObjectId(id) }, { $set: { developerUid: userUid } });
             }
         }
-        // --- END OWNERSHIP CHECK ---
 
         if (!isOwner) {
              return res.status(403).send({ message: "Forbidden: Only the model owner can update it." });
@@ -324,21 +350,20 @@ app.patch('/models/:id', verifyToken, async (req, res) => {
         
         const filter = { _id: new ObjectId(id) }; 
 
-        // Update fields including new assignment fields (if provided by client)
         const updateDoc = {
             $set: {
                 modelName: updatedData.modelName,
-                name: updatedData.modelName, // Sync name
+                name: updatedData.modelName, 
                 description: updatedData.description,
                 
+                // 💡 price ফিল্ড না থাকলেও এটি সঠিক
                 price: updatedData.price !== undefined && updatedData.price !== null 
                        ? parseFloat(updatedData.price) 
                        : existingModel.price, 
                 
                 category: updatedData.category,
-                framework: updatedData.category, // Sync framework
+                framework: updatedData.category,
                 imageUrl: updatedData.imageUrl, 
-                // Note: useCase and dataset should ideally be added to client UpdateModel form
                 useCase: updatedData.useCase || existingModel.useCase, 
                 dataset: updatedData.dataset || existingModel.dataset,
             }
@@ -348,7 +373,6 @@ app.patch('/models/:id', verifyToken, async (req, res) => {
         if (result.modifiedCount === 0) {
             const updatedModel = await AIModelOne.findById(id);
             if (updatedModel) {
-                 // Send back the model if no changes were made but found (common successful PATCH response)
                  return res.send(updatedModel); 
             }
             return res.status(404).send({ message: "Update failed or model not found." });
@@ -363,9 +387,8 @@ app.patch('/models/:id', verifyToken, async (req, res) => {
     }
 });
 
-
-// DELETE: Delete a model by ID (Private - Verification and Ownership check required)
 app.delete('/models/:id', verifyToken, async (req, res) => { 
+    await connectDB();
     try {
         const id = req.params.id;
         const userUid = req.user.uid; 
@@ -382,7 +405,6 @@ app.delete('/models/:id', verifyToken, async (req, res) => {
 
         let isOwner = false;
 
-        // --- OWNERSHIP CHECK WITH FALLBACK ---
         if (existingModel.developerUid) {
             if (existingModel.developerUid === userUid) {
                 isOwner = true;
@@ -391,13 +413,11 @@ app.delete('/models/:id', verifyToken, async (req, res) => {
             isOwner = true;
             await AIModelOne.updateOne({ _id: new ObjectId(id) }, { $set: { developerUid: userUid } });
         }
-        // --- END OWNERSHIP CHECK ---
 
         if (!isOwner) {
             return res.status(403).send({ message: "Forbidden: Only the model owner can delete it." });
         }
         
-        // Delete only if ownership passed
         const result = await AIModelOne.deleteOne({ _id: new ObjectId(id) }); 
 
         if (result.deletedCount === 0) {
@@ -411,8 +431,5 @@ app.delete('/models/:id', verifyToken, async (req, res) => {
     }
 });
 
-
-// --- Start Server ---
-app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-});
+// ------------------- VERCEL EXPORT -------------------
+module.exports = app;
